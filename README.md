@@ -3,32 +3,28 @@
 A descriptor-driven memory-to-stream DMA engine: it reads a contiguous block
 out of memory and pushes it out over an AXI4-Stream master interface with
 correct `TLAST` framing, decoupled by an internal FIFO so the memory side and
-the stream side can run at different, independently-stalling rates. Written in
-synthesizable Verilog-2001, simulated with Icarus Verilog.
+the stream side can run at different, independently-stalling rates. Written
+in synthesizable Verilog-2001, simulated with Icarus Verilog.
+
+[![Verilog](https://img.shields.io/badge/RTL-Verilog--2001-blue)]()
+[![Sim](https://img.shields.io/badge/Simulator-Icarus%20Verilog-informational)]()
+[![Status](https://img.shields.io/badge/Testbench-PASS-brightgreen)]()
 
 ## Architecture
 
-```
- cfg_addr/cfg_len/cfg_start
-          |
-          v
-   +-------------+      mem_addr/mem_re      +--------+
-   |  top FSM    |-------------------------->|        |
-   |  (IDLE/RUN) |<-- mem_rdata/mem_rvalid --| memory |
-   +-------------+                           +--------+
-          |
-   +------+-------+        +-----------+        +--------------+
-   | mem_reader   |--push->| axis_fifo |--pop-->| axis_master  |---> m_axis_t*
-   | (addr gen,   |        | (depth=16)|        | (TLAST gen,  |
-   |  FSM)        |        +-----------+        |  passthrough)|
-   +--------------+                             +--------------+
-```
+![AXI4-Stream DMA architecture](docs/images/dma_architecture.png)
 
+* **`axis_dma_top`** is the descriptor front-end: it latches
+  `cfg_addr`/`cfg_len` on `cfg_start`, issues a synchronized start pulse to
+  both engines below, and reports `status_busy` / `status_done` (the latter
+  tied to the *master* finishing — i.e. the last beat being accepted
+  downstream, not just fetched from memory).
 * **`mem_reader`** walks `cfg_len` sequential addresses starting at
-  `cfg_addr`, issues one read at a time to a fixed-latency synchronous memory,
-  and pushes each response into the FIFO. It only issues a new request when
-  the FIFO reports a free slot, which is what keeps the design correct without
-  needing an outstanding-transaction counter (see *Design notes* below).
+  `cfg_addr`, issues one read at a time to a fixed-latency synchronous
+  memory, and pushes each response into the FIFO. It only issues a new
+  request when the FIFO reports a free slot, which is what keeps the design
+  correct without needing an outstanding-transaction counter (see *Design
+  notes* below).
 * **`axis_fifo`** is a generic synchronous FIFO with `valid`/`ready` ports on
   both sides — i.e. it already speaks the AXI4-Stream handshake, so it drops
   straight into the datapath between the memory-side producer and the
@@ -37,11 +33,11 @@ synthesizable Verilog-2001, simulated with Icarus Verilog.
 * **`axis_master`** drains the FIFO onto the external AXI4-Stream bus,
   asserting `TVALID` only while a transfer is active and computing `TLAST`
   from a beat counter so the sink can frame the burst.
-* **top FSM** (`axis_dma_top`) is the descriptor front-end: it latches
-  `cfg_addr`/`cfg_len` on `cfg_start`, issues a synchronized start pulse to
-  both engines, and reports `status_busy` / `status_done` (the latter tied to
-  the *master* finishing, i.e. the last beat being accepted downstream — not
-  just fetched from memory).
+
+Backpressure (`TREADY`) flows right-to-left through `axis_master` ↔
+`axis_fifo` ↔ `mem_reader`, decoupling the memory-side producer from the
+stream-side consumer — neither block needs to know how fast the other one
+is.
 
 ## Module hierarchy
 
@@ -72,13 +68,16 @@ synthesizable Verilog-2001, simulated with Icarus Verilog.
 1. Instantiates a behavioural single-port synchronous memory (1024 x 32-bit,
    1-cycle read latency) and fills it with random data.
 2. Drives a randomized `m_axis_tready` (~75% asserted) on the stream sink to
-   exercise backpressure through the FIFO and the `mem_reader`'s flow control.
+   exercise backpressure through the FIFO and the `mem_reader`'s flow
+   control.
 3. Runs four back-to-back transfers of varying address/length — including a
    1-beat edge case (`len = 1`, where `TLAST` must fire on the only beat) and
    a 64-beat burst that overflows the 16-entry FIFO multiple times over.
 4. For each transfer, checks: the number of beats received equals `cfg_len`,
    every beat's data is bit-exact against `mem_array[addr + i]` **in order**,
    and `TLAST` is asserted on exactly the last beat and nowhere else.
+
+### Proof of passing run
 
 Latest run — 4 transfers, 114 beats total, 0 errors:
 
@@ -92,20 +91,27 @@ axis_dma TB: 4 transfers, RESULT: PASS
 --------------------------------------------
 ```
 
-A VCD waveform (`sim/wave.vcd`) is produced for inspection in GTKWave/Surfer —
-useful for visually confirming the `TVALID`/`TREADY`/`TLAST` handshake and the
-FIFO filling/draining under backpressure.
+### Waveform proof (GTKWave)
+
+Captured straight from the `sim/wave.vcd` produced by the run above —
+`m_axis_tvalid`/`m_axis_tready`/`m_axis_tlast` framing each beat, plus the
+FIFO's internal `full`/`empty` flags showing it absorbing the backpressure
+the testbench injects:
+
+![DMA transfer waveform in GTKWave](docs/images/Output.png)
 
 ## Running the simulation
 
-Requires Icarus Verilog (`iverilog`/`vvp`).
+Requires Icarus Verilog (`iverilog`/`vvp`). On Windows, run this from a WSL
+Ubuntu terminal (`sudo apt install -y iverilog gtkwave`) or use the native
+Windows build from [bleyer.org/icarus](https://bleyer.org/icarus/).
 
-```
+```bash
 cd axi4_stream_dma
 iverilog -g2005 -o sim/sim.vvp rtl/axis_fifo.v rtl/mem_reader.v \
          rtl/axis_master.v rtl/axis_dma_top.v tb/tb_axis_dma_top.v
 vvp sim/sim.vvp
-gtkwave sim/wave.vcd      # optional, to view the waveform
+gtkwave sim/wave.vcd      # optional, to view the waveform interactively
 ```
 
 ## Design notes / trade-offs
